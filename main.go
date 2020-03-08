@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"golang.org/x/crypto/ssh"
 	"io/ioutil"
 	"net"
@@ -43,6 +44,12 @@ type Client struct {
 // ViaSSHDialer struct
 type ViaSSHDialer struct {
 	client *ssh.Client
+	_      *context.Context
+}
+
+// Dial ssh dialer
+func (v *ViaSSHDialer) Dial(context context.Context, addr string) (net.Conn, error) {
+	return v.client.Dial("tcp", addr)
 }
 
 var (
@@ -102,34 +109,29 @@ func formatPort(port interface{}) string {
 }
 
 func run() {
-	Local = connect(true)
-	Remote = connect(false)
+	var err error
+	Local, err = connect(true)
+	if err != nil {
+		fmt.Println("Local connect error:", err)
+		return
+	}
+	Remote, err = connect(false)
+	if err != nil {
+		fmt.Println("Remote connect error:", err)
+		return
+	}
 }
 
-func connect(local bool) *sql.DB {
+func connect(local bool) (*sql.DB, error) {
 	conf := Config.Remote
 	if local {
 		conf = Config.Local
 	}
-	if conf.Mode == "tcp" {
-		dbPort := formatPort(conf.DBPort)
-		conStr := conf.DBUser + ":" + conf.DBPassword + "@tcp(" + conf.DBHost + ":" + dbPort + ")/" + conf.Database + "?charset=" + conf.Charset
-		db, err := sql.Open("mysql", conStr)
-		if err != nil {
-			fmt.Println("MySQL Error:", err)
-			db.Close()
-			return nil
-		}
-		err = db.Ping()
-		if err != nil {
-			db.Close()
-			fmt.Println("MySQL Connect Error:", err)
-			return nil
-		}
-		return db
-	} else if conf.Mode == "ssh" {
-		port := formatPort(conf.Port)
-		// dbPort := formatPort(conf.DBPort)
+	port := formatPort(conf.Port)
+	dialer := conf.Mode
+
+	if conf.Mode == "ssh" {
+		dialer = "mysql+tcp"
 		var client *ssh.Client
 		var err error
 		if conf.PrivateKey != "" {
@@ -138,14 +140,24 @@ func connect(local bool) *sql.DB {
 			client, err = dialWithPassword(conf.Host+":"+port, conf.User, conf.Password)
 		}
 		if err != nil {
-			return nil
+			return nil, err
 		}
-		session, err := client.NewSession()
-		defer session.Close()
-		cmd, err := session.CombinedOutput("cd /; ls")
-		fmt.Println(string(cmd), err)
+		mysql.RegisterDialContext(dialer, (&ViaSSHDialer{client, nil}).Dial)
 	}
-	return nil
+
+	dbPort := formatPort(conf.DBPort)
+	conStr := conf.DBUser + ":" + conf.DBPassword + "@" + dialer + "(" + conf.DBHost + ":" + dbPort + ")/" + conf.Database + "?charset=" + conf.Charset
+	db, err := sql.Open("mysql", conStr)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	err = db.Ping()
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
 }
 
 func dialWithPassword(addr, user, passwd string) (*ssh.Client, error) {
