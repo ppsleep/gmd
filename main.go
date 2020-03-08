@@ -120,6 +120,53 @@ func run() {
 		fmt.Println("Remote connect error:", err)
 		return
 	}
+	var table string
+	remoteTables := map[string]int{}
+	rows, err := Remote.Query("SHOW TABLES")
+	defer rows.Close()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	for rows.Next() {
+		rows.Scan(&table)
+		remoteTables[table] = 1
+	}
+	rows, err = Local.Query("SHOW TABLES")
+	defer rows.Close()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	for rows.Next() {
+		rows.Scan(&table)
+		if remoteTables[table] == 1 {
+			diff(table)
+		} else {
+			create(table)
+		}
+	}
+	fmt.Println("Done")
+}
+
+func diff(table string) {
+	fmt.Printf("Diff table `%s`...\n", table)
+}
+
+func create(table string) {
+	fmt.Printf("Table `%s` does not exist, creating...\n", table)
+	var name, sql string
+	err := Local.QueryRow("SHOW CREATE TABLE "+table).Scan(&name, &sql)
+	if err != nil {
+		fmt.Printf("Table `%s` export failed\n", table)
+		return
+	}
+	_, err = Remote.Exec(sql)
+	if err != nil {
+		fmt.Printf("Table `%s` create failed: %s\n", table, err)
+		return
+	}
+	fmt.Printf("Table `%s` create succeed\n", table)
 }
 
 func connect(local bool) (*sql.DB, error) {
