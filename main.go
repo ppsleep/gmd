@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/go-sql-driver/mysql"
+	"github.com/manifoldco/promptui"
 	"golang.org/x/crypto/ssh"
 	"io/ioutil"
 	"net"
@@ -16,8 +17,8 @@ import (
 
 // ConfigStruct struct
 type ConfigStruct struct {
-	Local  ConfStruct
-	Remote ConfStruct
+	Source ConfStruct
+	Target ConfStruct
 }
 
 // ConfStruct struct
@@ -55,10 +56,10 @@ func (v *ViaSSHDialer) Dial(context context.Context, addr string) (net.Conn, err
 var (
 	// Config struct
 	Config ConfigStruct
-	// Local local db
-	Local *sql.DB
-	// Remote local db
-	Remote *sql.DB
+	// Source source db
+	Source *sql.DB
+	// Target target db
+	Target *sql.DB
 )
 
 func usage() {
@@ -110,19 +111,19 @@ func formatPort(port interface{}) string {
 
 func run() {
 	var err error
-	Local, err = connect(true)
+	Source, err = connect(true)
 	if err != nil {
-		fmt.Println("Local connect error:", err)
+		fmt.Println("Source connect error:", err)
 		return
 	}
-	Remote, err = connect(false)
+	Target, err = connect(false)
 	if err != nil {
-		fmt.Println("Remote connect error:", err)
+		fmt.Println("Target connect error:", err)
 		return
 	}
 	var table string
-	remoteTables := map[string]int{}
-	rows, err := Remote.Query("SHOW TABLES")
+	sourceTables := map[string]int{}
+	rows, err := Source.Query("SHOW TABLES")
 	defer rows.Close()
 	if err != nil {
 		fmt.Println(err)
@@ -130,9 +131,11 @@ func run() {
 	}
 	for rows.Next() {
 		rows.Scan(&table)
-		remoteTables[table] = 1
+		sourceTables[table] = 1
 	}
-	rows, err = Local.Query("SHOW TABLES")
+	// target
+	//targetTables := map[string]int{}
+	rows, err = Target.Query("SHOW TABLES")
 	defer rows.Close()
 	if err != nil {
 		fmt.Println(err)
@@ -140,13 +143,70 @@ func run() {
 	}
 	for rows.Next() {
 		rows.Scan(&table)
-		if remoteTables[table] == 1 {
+		if sourceTables[table] == 1 {
 			diff(table)
 		} else {
-			create(table)
+			renameOrDelete(table)
 		}
+		//targetTables[table] = 1
 	}
+	// for rows.Next() {
+	// 	rows.Scan(&table)
+	// 	if targetTables[table] == 1 {
+	// 		diff(table)
+	// 	} else {
+	// 		create(table)
+	// 	}
+	// }
 	fmt.Println("Done")
+}
+
+func renameOrDelete(table string) {
+	lable := fmt.Sprintf("The table `%s` is existing on the target database but does not exist in the source database. Please select your operation", table)
+	prompt := promptui.Select{
+		Label: lable,
+		Items: []string{
+			"Skip",
+			"Delete the table `" + table + "`",
+			"Rename the table `" + table + "`",
+		},
+	}
+	index, _, _ := prompt.Run()
+	if index == 1 {
+		deleteTable(table)
+	} else if index == 2 {
+		renameTable(table)
+	}
+}
+
+func deleteTable(table string) {
+	lable := fmt.Sprintf("The table `%s` cannot be recovered after deletion, please confirm:", table)
+	prompt := promptui.Select{
+		Label: lable,
+		Items: []string{
+			"Go back to reselect",
+			"Delete the table `" + table + "`",
+		},
+	}
+	index, _, _ := prompt.Run()
+	if index == 1 {
+		deleteTableByName(table)
+	} else {
+		renameOrDelete(table)
+	}
+}
+
+func deleteTableByName(table string) {
+	_, err := Target.Exec("DROP TABLE `" + table + "`")
+	if err != nil {
+		fmt.Println(err)
+	} else {
+		fmt.Printf("The table `%s` is deleted\n", table)
+	}
+}
+
+func renameTable(table string) {
+
 }
 
 func diff(table string) {
@@ -156,12 +216,12 @@ func diff(table string) {
 func create(table string) {
 	fmt.Printf("Table `%s` does not exist, creating...\n", table)
 	var name, sql string
-	err := Local.QueryRow("SHOW CREATE TABLE "+table).Scan(&name, &sql)
+	err := Source.QueryRow("SHOW CREATE TABLE "+table).Scan(&name, &sql)
 	if err != nil {
 		fmt.Printf("Table `%s` export failed\n", table)
 		return
 	}
-	_, err = Remote.Exec(sql)
+	_, err = Target.Exec(sql)
 	if err != nil {
 		fmt.Printf("Table `%s` create failed: %s\n", table, err)
 		return
@@ -169,10 +229,10 @@ func create(table string) {
 	fmt.Printf("Table `%s` create succeed\n", table)
 }
 
-func connect(local bool) (*sql.DB, error) {
-	conf := Config.Remote
-	if local {
-		conf = Config.Local
+func connect(source bool) (*sql.DB, error) {
+	conf := Config.Target
+	if source {
+		conf = Config.Source
 	}
 	port := formatPort(conf.Port)
 	dialer := conf.Mode
@@ -214,7 +274,7 @@ func dialWithPassword(addr, user, passwd string) (*ssh.Client, error) {
 			ssh.Password(passwd),
 		},
 		HostKeyCallback: ssh.HostKeyCallback(
-			func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			func(hostname string, target net.Addr, key ssh.PublicKey) error {
 				return nil
 			},
 		),
@@ -237,7 +297,7 @@ func dialWithPrivateKey(addr, user, keyfile string) (*ssh.Client, error) {
 			ssh.PublicKeys(signature),
 		},
 		HostKeyCallback: ssh.HostKeyCallback(
-			func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			func(hostname string, target net.Addr, key ssh.PublicKey) error {
 				return nil
 			},
 		),
