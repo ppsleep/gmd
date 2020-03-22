@@ -221,8 +221,10 @@ func renameTable(table string) {
 		item := []string{
 			"Go back to reselect",
 		}
-		for k := range sourceTables {
-			item = append(item, k)
+		for k, v := range sourceTables {
+			if v == -1 {
+				item = append(item, k)
+			}
 		}
 		prompt := promptui.Select{
 			Label: "Please select a table name or back to reselect",
@@ -232,7 +234,7 @@ func renameTable(table string) {
 		if index == 0 {
 			renameTable(table)
 		} else {
-			renameTableByName(table, rename)
+			renameTableByName(table, rename, false)
 		}
 	} else if index == 2 {
 		prompt := promptui.Prompt{
@@ -243,19 +245,23 @@ func renameTable(table string) {
 			fmt.Println(err)
 			renameTable(table)
 		} else {
-			renameTableByName(table, result)
+			renameTableByName(table, result, true)
 		}
 	} else {
 		renameOrDelete(table)
 	}
 }
 
-func renameTableByName(table, rename string) {
+func renameTableByName(table, rename string, newname bool) {
 	sql := fmt.Sprintf("RENAME TABLE `%s` TO `%s`", table, rename)
 	_, err := Target.Exec(sql)
 	if err != nil {
 		fmt.Println(err)
 		renameTable(table)
+		return
+	}
+	if !newname {
+		sourceTables[rename] = 1
 	}
 }
 
