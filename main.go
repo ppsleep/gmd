@@ -60,6 +60,9 @@ var (
 	Source *sql.DB
 	// Target target db
 	Target *sql.DB
+
+	sourceTables = map[string]int{}
+	targetTables = map[string]int{}
 )
 
 func usage() {
@@ -122,7 +125,6 @@ func run() {
 		return
 	}
 	var table string
-	sourceTables := map[string]int{}
 	rows, err := Source.Query("SHOW TABLES")
 	defer rows.Close()
 	if err != nil {
@@ -134,7 +136,6 @@ func run() {
 		sourceTables[table] = 1
 	}
 	// target
-	//targetTables := map[string]int{}
 	rows, err = Target.Query("SHOW TABLES")
 	defer rows.Close()
 	if err != nil {
@@ -143,21 +144,21 @@ func run() {
 	}
 	for rows.Next() {
 		rows.Scan(&table)
-		if sourceTables[table] == 1 {
-			diff(table)
-		} else {
-			renameOrDelete(table)
-		}
-		//targetTables[table] = 1
+		targetTables[table] = 1
 	}
-	// for rows.Next() {
-	// 	rows.Scan(&table)
-	// 	if targetTables[table] == 1 {
-	// 		diff(table)
-	// 	} else {
-	// 		create(table)
-	// 	}
-	// }
+	// new table in source
+	for k := range sourceTables {
+		if targetTables[k] != 1 {
+			sourceTables[k] = -1
+		}
+	}
+	// redundant table in target
+	for k := range targetTables {
+		if sourceTables[k] == 0 {
+			renameOrDelete(k)
+		}
+	}
+
 	fmt.Println("Done")
 }
 
@@ -200,13 +201,62 @@ func deleteTableByName(table string) {
 	_, err := Target.Exec("DROP TABLE `" + table + "`")
 	if err != nil {
 		fmt.Println(err)
+		renameOrDelete(table)
 	} else {
 		fmt.Printf("The table `%s` is deleted\n", table)
 	}
 }
 
 func renameTable(table string) {
+	prompt := promptui.Select{
+		Label: "Please select your operation",
+		Items: []string{
+			"Go back to reselect",
+			"Select a table name from the source database",
+			"Input a new table name",
+		},
+	}
+	index, _, _ := prompt.Run()
+	if index == 1 {
+		item := []string{
+			"Go back to reselect",
+		}
+		for k := range sourceTables {
+			item = append(item, k)
+		}
+		prompt := promptui.Select{
+			Label: "Please select a table name or back to reselect",
+			Items: item,
+		}
+		index, rename, _ := prompt.Run()
+		if index == 0 {
+			renameTable(table)
+		} else {
+			renameTableByName(table, rename)
+		}
+	} else if index == 2 {
+		prompt := promptui.Prompt{
+			Label: "Please input a new table name",
+		}
+		result, err := prompt.Run()
+		if err != nil {
+			fmt.Println(err)
+			renameTable(table)
+		} else {
+			renameTableByName(table, result)
+		}
+	} else {
+		renameOrDelete(table)
+	}
+}
 
+func renameTableByName(table, rename string) {
+	sql := fmt.Sprintf("RENAME TABLE `%s` TO `%s`", table, rename)
+	_, err := Target.Exec(sql)
+	if err != nil {
+		fmt.Println(err)
+		renameTable(table)
+	}
 }
 
 func diff(table string) {
