@@ -48,6 +48,19 @@ type ViaSSHDialer struct {
 	_      *context.Context
 }
 
+// ColumnStruct struct
+type ColumnStruct struct {
+	Field      string
+	Type       string
+	Collation  interface{}
+	Null       string
+	Key        string
+	Default    interface{}
+	Extra      string
+	Privileges string
+	Comment    string
+}
+
 // Dial ssh dialer
 func (v *ViaSSHDialer) Dial(context context.Context, addr string) (net.Conn, error) {
 	return v.client.Dial("tcp", addr)
@@ -61,8 +74,11 @@ var (
 	// Target target db
 	Target *sql.DB
 
-	sourceTables = map[string]int{}
-	targetTables = map[string]int{}
+	sourceTables       = map[string]int{}
+	targetTables       = map[string]int{}
+	sourceColumnTables = map[string]map[string]ColumnStruct{}
+	targetColumnTables = map[string]map[string]ColumnStruct{}
+	newColumnTables    = map[string]map[string]ColumnStruct{}
 )
 
 func usage() {
@@ -156,6 +172,14 @@ func run() {
 	for k := range targetTables {
 		if sourceTables[k] == 0 {
 			renameOrDelete(k)
+		}
+	}
+	// diff
+	for k, v := range sourceTables {
+		if v == -1 {
+			create(k)
+		} else {
+			diff(k)
 		}
 	}
 
@@ -267,12 +291,171 @@ func renameTableByName(table, rename string, newname bool) {
 
 func diff(table string) {
 	fmt.Printf("Diff table `%s`...\n", table)
+	rows, err := Target.Query("SHOW FULL COLUMNS FROM `" + table + "`")
+	defer rows.Close()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	targetColumnTables[table] = map[string]ColumnStruct{}
+	for rows.Next() {
+		var column ColumnStruct
+		rows.Scan(
+			&column.Field,
+			&column.Type,
+			&column.Collation,
+			&column.Null,
+			&column.Key,
+			&column.Default,
+			&column.Extra,
+			&column.Privileges,
+			&column.Comment,
+		)
+		targetColumnTables[table][column.Field] = column
+	}
+	rows, err = Source.Query("SHOW FULL COLUMNS FROM `" + table + "`")
+	defer rows.Close()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sourceColumnTables[table] = map[string]ColumnStruct{}
+	newColumnTables[table] = map[string]ColumnStruct{}
+	for rows.Next() {
+		var column ColumnStruct
+		rows.Scan(
+			&column.Field,
+			&column.Type,
+			&column.Collation,
+			&column.Null,
+			&column.Key,
+			&column.Default,
+			&column.Extra,
+			&column.Privileges,
+			&column.Comment,
+		)
+		sourceColumnTables[table][column.Field] = column
+		if targetColumnTables[table][column.Field].Field == "" {
+			newColumnTables[table][column.Field] = column
+		}
+	}
+	for k := range targetColumnTables[table] {
+		if sourceColumnTables[table][k].Field == "" {
+			renameOrDeleteColumn(k, table)
+		}
+	}
+}
+
+func renameOrDeleteColumn(column, table string) {
+	lable := fmt.Sprintf("The field `%s` is existing on the target table `%s` but does not exist in the source database. Please select your operation", column, table)
+	prompt := promptui.Select{
+		Label: lable,
+		Items: []string{
+			"Skip",
+			"Delete the field `" + column + "`",
+			"Rename the field `" + column + "`",
+		},
+	}
+	index, _, _ := prompt.Run()
+	if index == 1 {
+		deleteColumn(column, table)
+	} else if index == 2 {
+		renameColumn(column, table)
+	}
+}
+
+func deleteColumn(column, table string) {
+	lable := fmt.Sprintf("The field `%s` cannot be recovered after deletion, please confirm:", column)
+	prompt := promptui.Select{
+		Label: lable,
+		Items: []string{
+			"Go back to reselect",
+			"Delete the field `" + column + "`",
+		},
+	}
+	index, _, _ := prompt.Run()
+	if index == 1 {
+		deleteColumnFromTable(column, table)
+	} else {
+		renameOrDelete(table)
+	}
+}
+
+func renameColumn(column, table string) {
+	prompt := promptui.Select{
+		Label: "Please select your operation",
+		Items: []string{
+			"Go back to reselect",
+			"Select a field name from the source table `" + table + "`",
+			"Input a new field name",
+		},
+	}
+	index, _, _ := prompt.Run()
+	if index == 1 {
+		item := []string{
+			"Go back to reselect",
+		}
+		for k := range newColumnTables[table] {
+			item = append(item, k)
+		}
+		prompt := promptui.Select{
+			Label: "Please select a field name or back to reselect",
+			Items: item,
+		}
+		index, rename, _ := prompt.Run()
+		if index == 0 {
+			renameColumn(column, table)
+		} else {
+			renameColumnFromTable(column, rename, table, false)
+		}
+	} else if index == 2 {
+		prompt := promptui.Prompt{
+			Label: "Please input a new field name",
+		}
+		result, err := prompt.Run()
+		if err != nil {
+			fmt.Println(err)
+			renameColumn(column, table)
+		} else {
+			renameColumnFromTable(column, result, table, true)
+		}
+	} else {
+		renameOrDeleteColumn(column, table)
+	}
+}
+
+func deleteColumnFromTable(column, table string) {
+	sql := fmt.Sprintf("ALTER TABLE `%s` DROP `%s`", table, column)
+	_, err := Target.Exec(sql)
+	if err != nil {
+		fmt.Println(err)
+		renameOrDeleteColumn(column, table)
+	} else {
+		fmt.Printf("The field `%s` is deleted\n", column)
+	}
+}
+
+func renameColumnFromTable(column, rename, table string, newname bool) {
+	Type := targetColumnTables[table][column].Type
+	if !newname {
+		Type = sourceColumnTables[table][rename].Type
+	}
+	sql := fmt.Sprintf("ALTER TABLE `%s` CHANGE `%s` `%s` %s", table, column, rename, Type)
+	_, err := Target.Exec(sql)
+	if err != nil {
+		fmt.Println(err)
+		renameColumn(column, table)
+		return
+	}
+	if !newname {
+		delete(newColumnTables[table], rename)
+	}
 }
 
 func create(table string) {
 	fmt.Printf("Table `%s` does not exist, creating...\n", table)
 	var name, sql string
-	err := Source.QueryRow("SHOW CREATE TABLE "+table).Scan(&name, &sql)
+	err := Source.QueryRow("SHOW CREATE TABLE `"+table+"`").Scan(&name, &sql)
 	if err != nil {
 		fmt.Printf("Table `%s` export failed\n", table)
 		return
